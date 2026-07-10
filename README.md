@@ -2,7 +2,7 @@
 
 > [!CAUTION]
 > Included in GTNH Version 2.8 and above, OpenComputers Transposers fluid transfer rates are upgradable beyond the base value when crafted with an appropriate Fluid Regulator in an Assembler.
-> You will need to use at least an LuV Fluid Regulator to support crafting for this water tier.
+> You will need to use at least an LuV Fluid Regulator to correct program work.
 > ![Transposer](/docs/transposer.png)
 ## Content
 
