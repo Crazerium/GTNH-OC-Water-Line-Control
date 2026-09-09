@@ -55,12 +55,27 @@ function t7controller:new(
   obj.neutroniumCount = 4608
   obj.supercoolantCount = 10000
 
+  -- GTNH 2.9 Degasser accepts Superconductor Base UV and higher only.
+  -- These are material/registry-name fragments, not localized display names.
+  -- Matching is case-insensitive in component-discover-lib.lua.
+  obj.superconductorFluidNames = {
+    "longasssuperconductornameforuvwire",  -- Superconductor Base UV
+    "longasssuperconductornameforuhvwire", -- Superconductor Base UHV
+    "superconductoruevbase",               -- Superconductor Base UEV
+    "superconductoruivbase",               -- Superconductor Base UIV
+    "superconductorumvbase"                -- Superconductor Base UMV
+  }
+
   ---Init T7Controller
   function obj:init()
     self:findMachineProxy()
 
     self:findTransposerFluid(self.inertGasTransposerProxy, {"helium", "neon", "krypton", "xenon"})
-    self:findTransposerFluid(self.superConductorTransposerProxy, {"superconductor"})
+    self:findTransposerAnyFluid(
+      self.superConductorTransposerProxy,
+      "superconductor",
+      self.superconductorFluidNames,
+      "GTNH 2.9 T7 requires Molten Superconductor Base UV/UHV/UEV/UIV/UMV")
     self:findTransposerFluid(self.netroniumTransposerProxy, {"neutronium"})
     self:findTransposerFluid(self.coolantTransposerProxy, {"supercoolant"})
 
@@ -149,19 +164,81 @@ function t7controller:new(
     self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
   end
 
-  ---Find side of transposer with fluid
+  ---Get a short list of non-empty fluids visible from a transposer.
+  ---@param proxy any
+  ---@return string
+  function obj:getVisibleFluids(proxy)
+    local visible = {}
+
+    for side = 0, 5, 1 do
+      if side ~= sides.up then
+        local tankCount = proxy.getTankCount(side) or 0
+
+        for tankIndex = 1, tankCount, 1 do
+          local fluid = proxy.getFluidInTank(side, tankIndex)
+
+          if fluid ~= nil and fluid.name ~= nil and (fluid.amount or 0) > 0 then
+            table.insert(
+              visible,
+              fluid.name.." ("..tostring(fluid.amount).." mB, side "..tostring(side)..")")
+          end
+        end
+      end
+    end
+
+    if #visible == 0 then
+      return "none; storage is empty or not connected to this transposer"
+    end
+
+    return table.concat(visible, "; ")
+  end
+
+  ---Find side of transposer with every requested fluid.
   ---@param proxy any
   ---@param fluidNames string[]
   function obj:findTransposerFluid(proxy, fluidNames)
     local result, skipped = componentDiscoverLib.discoverTransposerFluidStorage(proxy, fluidNames, {sides.up})
 
     if #skipped ~= 0 then
-      error("[T7] Can't find liquid: "..table.concat(skipped, ", "))
+      error(
+        "[T7] Can't find liquid: "..table.concat(skipped, ", ")
+        ..". Visible fluids: "..self:getVisibleFluids(proxy))
     end
 
     for key, value in pairs(result) do
       self.transposerLiquids[key] = value
     end
+  end
+
+  ---Find any one fluid matching a list of accepted registry-name fragments.
+  ---@param proxy any
+  ---@param storageKey string
+  ---@param fluidNames string[]
+  ---@param hint? string
+  function obj:findTransposerAnyFluid(proxy, storageKey, fluidNames, hint)
+    for _, fluidName in ipairs(fluidNames) do
+      local result, skipped = componentDiscoverLib.discoverTransposerFluidStorage(
+        proxy,
+        {fluidName},
+        {sides.up})
+
+      if #skipped == 0 and result[fluidName] ~= nil then
+        self.transposerLiquids[storageKey] = result[fluidName]
+
+        local descriptor = result[fluidName]
+        local fluid = proxy.getFluidInTank(descriptor.side, descriptor.tank)
+        if fluid ~= nil and fluid.name ~= nil then
+          event.push("log_info", "[T7] Detected superconductor fluid: "..fluid.name)
+        end
+        return
+      end
+    end
+
+    local message = "[T7] Can't find a valid superconductor base. Visible fluids: "..self:getVisibleFluids(proxy)
+    if hint ~= nil then
+      message = message..". "..hint
+    end
+    error(message)
   end
 
   ---Parse bit string to bits array

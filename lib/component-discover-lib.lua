@@ -151,7 +151,8 @@ function componentDiscover.discoverTransposerFluidStorage(proxy, fluidNames, ign
         local fluid = proxy.getFluidInTank(side, tankIndex)
 
         for fluidNameIndex, fluidName in pairs(fluidNames) do
-          if fluid.name ~= nil and string.match(fluid.name, escapePattern(fluidName)) then
+          if fluid ~= nil and fluid.name ~= nil
+            and string.find(string.lower(fluid.name), string.lower(fluidName), 1, true) ~= nil then
             table.remove(fluidNames, fluidNameIndex)
             fluidStorageDescriptor[fluidName] = {side = side, tank = tankIndex}
             break
