@@ -50,6 +50,7 @@ function t7controller:new(
 
   obj.stateMachine = stateMachineLib:new()
   obj.gtSensorParser = nil
+  obj.currentSuccessChance = nil
 
   obj.superconductorCount = 1440
   obj.neutroniumCount = 4608
@@ -88,8 +89,10 @@ function t7controller:new(
         -- If the Degasser already consumed something this cycle (for example after
         -- restarting the OC program mid-cycle), do not inject the requested fluids again.
         if self:hasInsertedFluids() then
+          self.currentSuccessChance = nil
           self.stateMachine:setState(self.stateMachine.states.waitEnd)
         else
+          self.currentSuccessChance = nil
           self.stateMachine:setState(self.stateMachine.states.work)
         end
       end
@@ -102,15 +105,19 @@ function t7controller:new(
       -- Never interpret a parser failure as 0000. In GTNH 2.9 that would cause us
       -- to inject 10 kL Super Coolant into an unrelated signal and guarantee failure.
       if bitString == nil then
+        self.currentSuccessChance = nil
         event.push("log_warning", "[T7] Can't read Degasser control signal; no fluids were inserted")
         self.stateMachine:setState(self.stateMachine.states.waitEnd)
         return
       end
 
       local bits = self:bitParser(bitString)
+      self.currentSuccessChance = 100
 
       if bits[1] == false and bits[2] == false and bits[3] == false and bits[4] == false then
-        self:putCoolant()
+        if self:putCoolant() == false then
+          self.currentSuccessChance = 0
+        end
         self.stateMachine:setState(self.stateMachine.states.waitEnd)
         return
       end
@@ -120,16 +127,16 @@ function t7controller:new(
         return
       end
 
-      if bits[1] == true then
-        self:putInertGas(bits)
+      if bits[1] == true and self:putInertGas(bits) == false then
+        self.currentSuccessChance = 0
       end
 
-      if bits[2] == true then
-        self:putSuperConductor()
+      if bits[2] == true and self:putSuperConductor() == false then
+        self.currentSuccessChance = 0
       end
 
-      if bits[3] == true then
-        self:putNeutronium()
+      if bits[3] == true and self:putNeutronium() == false then
+        self.currentSuccessChance = 0
       end
 
       self.stateMachine:setState(self.stateMachine.states.waitEnd)
@@ -234,11 +241,6 @@ function t7controller:new(
       if #skipped == 0 and result[fluidName] ~= nil then
         self.transposerLiquids[storageKey] = result[fluidName]
 
-        local descriptor = result[fluidName]
-        local fluid = proxy.getFluidInTank(descriptor.side, descriptor.tank)
-        if fluid ~= nil and fluid.name ~= nil then
-          event.push("log_info", "[T7] Detected superconductor fluid: "..fluid.name)
-        end
         return
       end
     end
@@ -327,21 +329,6 @@ function t7controller:new(
     return false
   end
 
-  ---Return a zero-padded signal for UI/logging.
-  ---@param bitString string|number|nil
-  ---@return string
-  function obj:formatSignal(bitString)
-    if bitString == nil then
-      return "????"
-    end
-
-    local signal = tostring(bitString)
-    if #signal < 4 then
-      signal = string.rep("0", 4 - #signal)..signal
-    end
-    return signal
-  end
-
   ---Parse bit string to bits array
   ---@param bitString string|number
   ---@return boolean[]
@@ -388,7 +375,10 @@ function t7controller:new(
     if result ~= count then
       self.controllerProxy.setWorkAllowed(false)
       event.push("log_warning", "[T7] Not enough "..inertGas.." for craft")
+      return false
     end
+
+    return true
   end
 
   ---Put super conductor in input hatch
@@ -402,7 +392,10 @@ function t7controller:new(
     if result ~= self.superconductorCount then
       self.controllerProxy.setWorkAllowed(false)
       event.push("log_warning", "[T7] Not enough superconductor for craft")
+      return false
     end
+
+    return true
   end
 
   ---Put super conductor in input hatch
@@ -416,7 +409,10 @@ function t7controller:new(
     if result ~= self.neutroniumCount then
       self.controllerProxy.setWorkAllowed(false)
       event.push("log_warning", "[T7] Not enough neutronium for craft")
+      return false
     end
+
+    return true
   end
 
   ---Put coolant in input hatch
@@ -430,7 +426,10 @@ function t7controller:new(
     if result ~= self.supercoolantCount then
       self.controllerProxy.setWorkAllowed(false)
       event.push("log_warning", "[T7] Not enough coolant for craft")
+      return false
     end
+
+    return true
   end
 
   ---Loop
@@ -451,11 +450,13 @@ function t7controller:new(
     end
 
     local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
-    local signal = self:formatSignal(self:getControlSignal())
+    local successChance = self.currentSuccessChance
 
-    -- GTNH 2.9 removed the old "Success chance:" sensor field. Showing the
-    -- control signal is both accurate and useful for verifying the automation.
-    return "State: ["..state.."] Signal: ["..signal.."]"
+    if successChance == nil then
+      return "State: ["..state.."] Success: [?%]"
+    end
+
+    return "State: ["..state.."] Success: ["..successChance.."%]"
   end
 
   setmetatable(obj, self)
