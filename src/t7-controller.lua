@@ -83,19 +83,28 @@ function t7controller:new(
 
     self.stateMachine.states.idle = self.stateMachine:createState("Idle")
     self.stateMachine.states.idle.update = function()
-      if self.gtSensorParser:getNumber(2, "Success chance:") == 100 then
-        self.stateMachine:setState(self.stateMachine.states.waitEnd)
-      elseif self.controllerProxy.hasWork() then
-        self.stateMachine:setState(self.stateMachine.states.work)
+      if self.controllerProxy.hasWork() then
+        -- GTNH 2.9 no longer exposes "Success chance:" in the old sensor slot.
+        -- If the Degasser already consumed something this cycle (for example after
+        -- restarting the OC program mid-cycle), do not inject the requested fluids again.
+        if self:hasInsertedFluids() then
+          self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        else
+          self.stateMachine:setState(self.stateMachine.states.work)
+        end
       end
     end
 
     self.stateMachine.states.work = self.stateMachine:createState("Work")
     self.stateMachine.states.work.init = function()
-      local bitString = self.gtSensorParser:getString(4, "Current control signal (binary): 0b")
+      local bitString = self:getControlSignal()
 
+      -- Never interpret a parser failure as 0000. In GTNH 2.9 that would cause us
+      -- to inject 10 kL Super Coolant into an unrelated signal and guarantee failure.
       if bitString == nil then
-        bitString = "0000"
+        event.push("log_warning", "[T7] Can't read Degasser control signal; no fluids were inserted")
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
       end
 
       local bits = self:bitParser(bitString)
@@ -241,6 +250,98 @@ function t7controller:new(
     error(message)
   end
 
+  ---Remove Minecraft formatting codes from a sensor line.
+  ---@param value string
+  ---@return string
+  function obj:stripFormatting(value)
+    return string.gsub(value or "", "§.", "")
+  end
+
+  ---Find a sensor-information line by a literal marker.
+  ---GTNH 2.9 returns encoded localization keys such as
+  ---GT5U.infodata.purification_unit_degasser.control_signal instead of the old English labels.
+  ---@param marker string
+  ---@return string|nil
+  function obj:findSensorLine(marker)
+    for _, line in ipairs(self.gtSensorParser.sensorData or {}) do
+      if string.find(line, marker, 1, true) ~= nil then
+        return line
+      end
+    end
+
+    return nil
+  end
+
+  ---Read the current 4-bit Degasser control signal.
+  ---Supports both GTNH 2.9 encoded sensor data and the old 2.8 English sensor line.
+  ---@return string|nil
+  function obj:getControlSignal()
+    local marker = "GT5U.infodata.purification_unit_degasser.control_signal"
+    local line = self:findSensorLine(marker)
+
+    if line ~= nil then
+      local data = self:stripFormatting(line)
+      local markerStart, markerEnd = string.find(data, marker, 1, true)
+
+      if markerStart ~= nil then
+        local tail = string.sub(data, markerEnd + 1)
+        -- IGregTechDeviceInformation.encode separates arguments with backslashes.
+        -- We only care about the first numeric argument after the localization key.
+        local signal = string.match(tail, "(%d+)")
+        if signal ~= nil then
+          return signal
+        end
+      end
+    end
+
+    -- Backwards-compatible fallback for GTNH 2.8.
+    for _, oldLine in ipairs(self.gtSensorParser.sensorData or {}) do
+      local clean = self:stripFormatting(oldLine)
+      local signal = string.match(clean, "Current control signal %(binary%):%s*0b([01]+)")
+      if signal ~= nil then
+        return signal
+      end
+    end
+
+    return nil
+  end
+
+  ---Check whether the Degasser already reports a consumed/inserted fluid this cycle.
+  ---This protects against duplicating inputs after restarting the OC program mid-cycle.
+  ---@return boolean
+  function obj:hasInsertedFluids()
+    local marker = "GT5U.infodata.purification_unit_degasser.fluid_inserted"
+
+    if self:findSensorLine(marker) ~= nil then
+      return true
+    end
+
+    -- Old sensor text fallback.
+    for _, line in ipairs(self.gtSensorParser.sensorData or {}) do
+      local clean = self:stripFormatting(line)
+      if string.find(string.lower(clean), "fluid inserted", 1, true) ~= nil then
+        return true
+      end
+    end
+
+    return false
+  end
+
+  ---Return a zero-padded signal for UI/logging.
+  ---@param bitString string|number|nil
+  ---@return string
+  function obj:formatSignal(bitString)
+    if bitString == nil then
+      return "????"
+    end
+
+    local signal = tostring(bitString)
+    if #signal < 4 then
+      signal = string.rep("0", 4 - #signal)..signal
+    end
+    return signal
+  end
+
   ---Parse bit string to bits array
   ---@param bitString string|number
   ---@return boolean[]
@@ -350,13 +451,11 @@ function t7controller:new(
     end
 
     local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
-    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+    local signal = self:formatSignal(self:getControlSignal())
 
-    if successChange == nil then
-      successChange = 0
-    end
-
-    return "State: ["..state.."] Success: ["..successChange.."%]"
+    -- GTNH 2.9 removed the old "Success chance:" sensor field. Showing the
+    -- control signal is both accurate and useful for verifying the automation.
+    return "State: ["..state.."] Signal: ["..signal.."]"
   end
 
   setmetatable(obj, self)
